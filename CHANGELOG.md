@@ -1,0 +1,78 @@
+# Changelog
+
+All notable changes to PhotoScribe are recorded here. Dates are ISO (YYYY-MM-DD).
+
+## [1.2.2] — 2026-06-22
+
+First cross-platform release: macOS **and** Windows.
+
+### Added
+- **Windows installer** (`PhotoScribe-Setup.exe`), built by GitHub Actions on every `v*` tag and attached to the release automatically. ExifTool is bundled, so Windows users have nothing else to install.
+- New custom app icon across both platforms.
+
+### Changed
+- Reworked `MetadataWriter.find_exiftool()` so a frozen build looks for ExifTool **next to the app executable** first (where it now ships), then `_MEIPASS`, then PATH / known locations.
+- Carried HEIC/HEIF support through to the Windows build.
+
+## [1.2.1] — 2026-06-22
+
+Reliability release for RAW/DNG handling and error reporting.
+
+### Added
+- **HEIC / HEIF support** via `pillow-heif` (iPhone photos). Added to supported formats, the file dialog, and the drop-zone label; libheif is bundled in the app.
+
+### Changed
+- RAW files (incl. DNG) are now decoded from their **embedded preview JPEG** first, falling back to a full LibRaw decode only when there's no usable preview. Fixes phone/HDR/Lightroom-converted DNGs that decoded dark or blank and made the model return nothing. Also faster.
+
+### Fixed
+- An empty or non-JSON model response now triggers **one automatic retry** and, if it still fails, a plain-English message — instead of the cryptic `JSON parse error: Expecting value: line 1 column 1 (char 0)`.
+
+## [1.2] — 2026-06-22
+
+### Added
+- **XMP sidecar support** for RAW files, with a selectable naming convention:
+  - Adobe / Lightroom — `photo.xmp` (extension replaced)
+  - Darktable / DigiKam — `photo.cr2.xmp` (extension kept)
+  Title, caption, and keywords are written to the correct `XMP-dc` fields.
+- **Keyword density** control (Fewer / Standard / More keywords) — no technical token settings exposed.
+
+### Fixed
+- LM Studio "thinking" models occasionally returning empty responses, by improving how JSON is extracted (and falling back to `reasoning_content`).
+
+## [1.1] — 2026-06-07
+- Windows build pipeline scaffolding and cross-platform ExifTool detection (the pipeline itself was first made to actually work in 1.2.2 — see notes below).
+
+## [1.0.0]
+- Initial release: local AI photo metadata generation (LM Studio / Ollama), IPTC + embedded XMP writing via ExifTool, batch context, prompts/presets, keyword vocabulary, CSV export.
+
+---
+
+## Build & infrastructure notes
+
+Engineering details worth remembering, especially for the Windows pipeline.
+
+### macOS build
+- `./build_app.sh` produces a signed + notarized `dist/PhotoScribe.dmg` and `.app`.
+- The app icon is the committed `PhotoScribe.icns` (regenerated from `icon.png`); `build_app.sh` only falls back to generating one from `logo.png` if `PhotoScribe.icns` is absent.
+- `logo.png` is the gold footer signature shown in-app — **not** the icon. Don't repurpose it.
+
+### Windows build (`.github/workflows/build-windows.yml`)
+Hard-won fixes:
+
+1. **ExifTool download.** exiftool.org no longer self-hosts the Windows zip — it's on SourceForge. `fetch-exiftool.ps1` reads the current version from `https://exiftool.org/ver.txt` and downloads `exiftool-<ver>_64.zip` from SourceForge. SourceForge serves the real file only to non-browser user agents, so the script sends a `curl/8.4.0` UA (a browser-like UA gets an HTML interstitial instead).
+
+2. **`exiftool_files` layout.** Modern ExifTool is not a single exe — it's `exiftool(-k).exe` (a launcher, renamed to `exiftool.exe`) plus an `exiftool_files\` folder with the Perl runtime. Bundling this **through** PyInstaller breaks Perl's `@INC` (`Can't locate strict.pm`). Fix: do **not** put ExifTool in the spec `datas`; instead copy `exiftool.exe` + `exiftool_files\` into `dist\PhotoScribe\` (next to the exe) as a post-build step, and have `find_exiftool()` look there.
+
+3. **CI release upload.** The workflow needs `permissions: contents: write` or `gh release upload` fails with `HTTP 403: Resource not accessible by integration`.
+
+4. **Triggers.** Builds on `v*` tags and manual `workflow_dispatch`. Manual runs upload the installer as a downloadable artifact; tag runs also attach it to the matching release. Installer version comes from the tag (falls back to `0.0.0` on non-tag runs).
+
+Local Windows build (Python 3.10–3.13):
+```
+pip install -r requirements.txt "pyinstaller>=6.0"
+powershell -ExecutionPolicy Bypass -File fetch-exiftool.ps1
+pyinstaller PhotoScribe-Windows.spec --noconfirm --clean
+Copy-Item exiftool.exe dist\PhotoScribe\ -Force
+Copy-Item exiftool_files dist\PhotoScribe\exiftool_files -Recurse -Force
+& "<path>\ISCC.exe" /DMyAppVersion=<version> installer.iss
+```
