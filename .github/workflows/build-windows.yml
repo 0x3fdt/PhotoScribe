@@ -41,6 +41,12 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller PhotoScribe-Windows.spec --noconfirm --clean
 
+      - name: Bundle ExifTool next to the app
+        shell: pwsh
+        run: |
+          Copy-Item exiftool.exe dist\PhotoScribe\ -Force
+          Copy-Item exiftool_files dist\PhotoScribe\exiftool_files -Recurse -Force
+
       - name: Install Inno Setup
         run: choco install innosetup --yes
 

@@ -21,8 +21,10 @@ a = Analysis(
     binaries=rawpy_binaries + heif_binaries,
     datas=pyside6_datas + rawpy_datas + heif_datas + [
         ('logo.png', '.'),
-        ('exiftool.exe', '.'),                  # ExifTool launcher
-        ('exiftool_files', 'exiftool_files'),   # Perl runtime it needs
+        # ExifTool is NOT bundled here — PyInstaller breaks its exiftool_files/
+        # Perl layout. It's copied next to the .exe as a post-build step
+        # (see the workflow / build instructions) and found at runtime via
+        # MetadataWriter.find_exiftool().
     ],
     hiddenimports=(
         rawpy_hiddenimports

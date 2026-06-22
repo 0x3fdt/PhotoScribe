@@ -362,10 +362,20 @@ class MetadataWriter:
     @staticmethod
     def find_exiftool():
         """Return the path to exiftool, or None if not found."""
-        # Check next to the bundled executable first (PyInstaller _MEIPASS)
+        exe = "exiftool.exe" if sys.platform == "win32" else "exiftool"
+
+        # In a frozen build, ExifTool ships next to the app executable (it's
+        # copied there post-build, keeping its exiftool_files/ folder intact —
+        # PyInstaller can't bundle that structure without breaking Perl's @INC).
+        if getattr(sys, 'frozen', False):
+            exedir = os.path.dirname(sys.executable)
+            bundled = os.path.join(exedir, exe)
+            if os.path.isfile(bundled):
+                return bundled
+
+        # Fallback: PyInstaller _MEIPASS (onefile builds / bundled data)
         meipass = getattr(sys, '_MEIPASS', None)
         if meipass:
-            exe = "exiftool.exe" if sys.platform == "win32" else "exiftool"
             bundled = os.path.join(meipass, exe)
             if os.path.isfile(bundled):
                 return bundled
