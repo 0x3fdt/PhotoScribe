@@ -1,6 +1,6 @@
 # PhotoScribe
 
-AI-powered photo metadata generator that runs entirely on your Mac. Drop in your photos, generate title, caption, and keywords using a local AI model, review everything, then write it straight to your files as IPTC and XMP metadata.
+AI-powered photo metadata generator that runs entirely on your Mac or Windows PC. Drop in your photos, generate title, caption, and keywords using a local AI model, review everything, then write it straight to your files as IPTC and XMP metadata.
 
 **No cloud. No subscription. No data leaves your machine.**
 
@@ -14,19 +14,23 @@ PhotoScribe requires two free pieces of software in addition to the app itself.
 
 ### 1. PhotoScribe
 
-Download the latest `PhotoScribe.dmg`, open it, and drag PhotoScribe to your Applications folder. That's it — no Python, no Terminal, no setup.
+Grab the latest build from the **[releases page](https://github.com/repomonkey/PhotoScribe/releases/latest)**.
+
+**macOS:** Download `PhotoScribe.dmg`, open it, and drag PhotoScribe to your Applications folder. That's it — no Python, no Terminal, no setup.
 
 > **First launch only:** macOS will ask if you're sure you want to open it. Click Open. This is normal for any app downloaded outside the Mac App Store and won't happen again.
 
+**Windows:** Download `PhotoScribe-Setup.exe`, run it, and follow the installer, then launch PhotoScribe from the Start menu. ExifTool is bundled in, so there's nothing else to install for writing metadata.
+
 ### 2. An AI backend — LM Studio or Ollama
 
-PhotoScribe needs a local AI backend running on your Mac. This is what actually looks at your photos and generates the descriptions and keywords. Two options are supported:
+PhotoScribe needs a local AI backend running on your computer. This is what actually looks at your photos and generates the descriptions and keywords. Two options are supported, both available for Mac and Windows:
 
 ---
 
 **Option A: LM Studio** *(recommended — no Terminal required)*
 
-[LM Studio](https://lmstudio.ai) is a polished Mac app for running local AI models. Download it from **[lmstudio.ai](https://lmstudio.ai)**, install it, then:
+[LM Studio](https://lmstudio.ai) is a polished app (Mac and Windows) for running local AI models. Download it from **[lmstudio.ai](https://lmstudio.ai)**, install it, then:
 
 1. Open LM Studio and go to the **Discover** tab
 2. Search for **gemma-3** and download a vision model — `gemma-3-12b` for best quality, `gemma-3-4b` for lighter machines
@@ -55,13 +59,15 @@ Ollama uses `http://localhost:11434` (the PhotoScribe default). It starts automa
 
 ExifTool is a small, free utility that does the actual work of embedding metadata into your photo files. PhotoScribe uses it behind the scenes when you click "Write Metadata to Files."
 
-You can generate and export metadata without ExifTool, but you won't be able to write it directly to files.
+**Windows:** Nothing to do — ExifTool is bundled inside the installer.
 
-If ExifTool isn't installed, PhotoScribe will tell you and offer a direct link to the installer. No Terminal required — the ExifTool website provides a standard macOS `.pkg` installer:
+**macOS:** ExifTool isn't bundled, so install it once. If it's missing, PhotoScribe will tell you and offer a direct link — no Terminal required, the ExifTool website provides a standard macOS `.pkg` installer:
 
 👉 **[Download ExifTool for macOS](https://exiftool.org/install.html)**
 
 Download the macOS Package, open it, and follow the prompts. Done.
+
+You can generate and export metadata without ExifTool, but you won't be able to write it directly to files.
 
 ---
 
@@ -78,7 +84,7 @@ Download the macOS Package, open it, and follow the prompts. Done.
 
 ### Supported formats
 
-**Standard:** JPEG, TIFF, PNG, WebP
+**Standard:** JPEG, HEIC/HEIF (iPhone photos), TIFF, PNG, WebP
 
 **RAW:** CR2, CR3 (Canon), NEF (Nikon), ARW (Sony), ORF (Olympus/OM System), RAF (Fujifilm), RW2 (Panasonic), PEF (Pentax), DNG, and more
 
@@ -165,6 +171,8 @@ To build the macOS app bundle yourself:
 
 This produces a signed and notarized `dist/PhotoScribe.dmg`. Requires Python 3.10–3.13 and your Apple Developer credentials stored via `xcrun notarytool store-credentials`.
 
+The **Windows installer** is built by GitHub Actions on every `v*` tag (`.github/workflows/build-windows.yml`), which attaches `PhotoScribe-Setup.exe` to the release automatically. To build it locally on Windows: install the dependencies, run `fetch-exiftool.ps1`, build with `pyinstaller PhotoScribe-Windows.spec`, copy `exiftool.exe` and `exiftool_files\` into `dist\PhotoScribe\`, then compile `installer.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php).
+
 ---
 
 ## Licence
@@ -175,4 +183,4 @@ MIT
 
 Built by [Andy Hutchinson](https://andyhutchinson.com.au)
 
-PhotoScribe uses [Ollama](https://ollama.com) for local AI inference and [ExifTool](https://exiftool.org) by Phil Harvey for metadata operations.
+PhotoScribe uses [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) for local AI inference and [ExifTool](https://exiftool.org) by Phil Harvey for metadata operations.
