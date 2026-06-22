@@ -9,6 +9,7 @@ Requires: Python 3.10+, PySide6, Pillow, requests, rawpy, exiftool (system)
 
 import sys
 import os
+import re
 import json
 import base64
 import threading
@@ -163,7 +164,7 @@ class OllamaWorker(QThread):
             if max(img.size) > max_dim:
                 ratio = max_dim / max(img.size)
                 new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-                img = img.resize(new_size, Image.LANCZOS)
+                img = img.resize(new_size, Image.BILINEAR)
             buffer = BytesIO()
             img.save(buffer, format="JPEG", quality=85)
             return base64.b64encode(buffer.getvalue()).decode("utf-8")
@@ -284,82 +285,140 @@ class OllamaWorker(QThread):
         return msg.get("content") or msg.get("reasoning_content", "")
 
     def run(self):
+        from concurrent.futures import ThreadPoolExecutor
+
         full_prompt = self._build_prompt()
         call_fn = self._call_openai if self.backend == "openai" else self._call_ollama
 
-        for i, photo in enumerate(self.photos):
-            if self._cancelled:
-                break
-            if photo.status == "done":
-                continue
+        # Build list of pending photo indices
+        pending = [(i, photo) for i, photo in enumerate(self.photos)
+                   if photo.status != "done"]
+        if not pending:
+            self.finished_all.emit()
+            return
 
-            self.progress.emit(i, "processing")
-            self.log_message.emit(f"Processing: {photo.filename}")
-            response_text = ""
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            # Pre-encode the first image
+            next_future = None
+            next_idx = 0
 
-            try:
-                img_b64 = self._encode_image(photo.filepath)
-                self.log_message.emit(f"Sending to {self.model}...")
+            if pending:
+                idx0, photo0 = pending[0]
+                self.progress.emit(idx0, "processing")
+                self.log_message.emit(f"Processing: {photo0.filename}")
+                next_future = executor.submit(self._encode_image, photo0.filepath)
 
-                # Call the model, retrying once if it returns nothing usable.
-                # A blank or JSON-less reply is what produces the
-                # "Expecting value: line 1 column 1 (char 0)" error.
-                meta = None
-                last_reason = "no response"
-                for attempt in range(2):
-                    if attempt > 0:
-                        self.log_message.emit(
-                            "Empty/unparseable response — retrying once..."
-                        )
-                    response_text = call_fn(img_b64, full_prompt)
-                    self.log_message.emit(
-                        f"Response received ({len(response_text)} chars)"
-                    )
-
-                    # Strip markdown fences and isolate the JSON object
-                    cleaned = response_text.strip()
-                    if cleaned.startswith("```"):
-                        lines = cleaned.split("\n")
-                        lines = [l for l in lines if not l.strip().startswith("```")]
-                        cleaned = "\n".join(lines).strip()
-                    start = cleaned.find("{")
-                    end = cleaned.rfind("}") + 1
-                    if start >= 0 and end > start:
-                        cleaned = cleaned[start:end]
-
-                    if not cleaned:
-                        last_reason = "the model returned an empty response"
-                        continue
-                    try:
-                        data = json.loads(cleaned)
-                    except json.JSONDecodeError as e:
-                        last_reason = f"the response wasn't valid JSON ({e})"
-                        continue
-
-                    meta = PhotoMetadata(
-                        title=data.get("title", "").strip(),
-                        caption=data.get("caption", "").strip(),
-                        keywords=self._clean_keywords(data.get("keywords", []))
-                    )
+            for pos, (i, photo) in enumerate(pending):
+                if self._cancelled:
                     break
 
-                if meta is None:
-                    raise ValueError(
-                        f"Couldn't read metadata — {last_reason}. "
-                        f"Try a different model, or increase Keyword density."
-                    )
+                # Get the pre-encoded image for this iteration
+                try:
+                    img_b64 = next_future.result()
+                except Exception as e:
+                    self.log_message.emit(f"Error: {e}")
+                    self.result.emit(i, str(e))
+                    # Start encoding next if available
+                    if pos + 1 < len(pending):
+                        next_i, next_photo = pending[pos + 1]
+                        self.progress.emit(next_i, "processing")
+                        self.log_message.emit(f"Processing: {next_photo.filename}")
+                        next_future = executor.submit(self._encode_image, next_photo.filepath)
+                    continue
 
-                self.result.emit(i, meta)
-                self.log_message.emit(f"Done: {photo.filename}")
+                # Start encoding the NEXT image while we call the AI
+                if pos + 1 < len(pending):
+                    next_i, next_photo = pending[pos + 1]
+                    self.progress.emit(next_i, "processing")
+                    self.log_message.emit(f"Processing: {next_photo.filename}")
+                    next_future = executor.submit(self._encode_image, next_photo.filepath)
 
-            except requests.exceptions.ConnectionError:
-                self.log_message.emit("Connection failed — is your AI backend running?")
-                self.result.emit(i, "Cannot connect to AI backend. Check the URL and that it's running.")
-            except Exception as e:
-                self.log_message.emit(f"Error: {e}")
-                self.result.emit(i, str(e))
+                # Call the AI model with current image
+                try:
+                    self.log_message.emit(f"Sending to {self.model}...")
+
+                    # Call the model, retrying once if it returns nothing usable.
+                    meta = None
+                    last_reason = "no response"
+                    for attempt in range(2):
+                        if self._cancelled:
+                            break
+                        if attempt > 0:
+                            self.log_message.emit(
+                                "Empty/unparseable response — retrying once..."
+                            )
+                        response_text = call_fn(img_b64, full_prompt)
+                        self.log_message.emit(
+                            f"Response received ({len(response_text)} chars)"
+                        )
+
+                        # Strip markdown fences and isolate the JSON object
+                        cleaned = response_text.strip()
+                        if cleaned.startswith("```"):
+                            lines = cleaned.split("\n")
+                            lines = [l for l in lines if not l.strip().startswith("```")]
+                            cleaned = "\n".join(lines).strip()
+                        start = cleaned.find("{")
+                        end = cleaned.rfind("}") + 1
+                        if start >= 0 and end > start:
+                            cleaned = cleaned[start:end]
+
+                        if not cleaned:
+                            last_reason = "the model returned an empty response"
+                            continue
+                        try:
+                            data = json.loads(cleaned)
+                        except json.JSONDecodeError as e:
+                            last_reason = f"the response wasn't valid JSON ({e})"
+                            continue
+
+                        meta = PhotoMetadata(
+                            title=data.get("title", "").strip(),
+                            caption=data.get("caption", "").strip(),
+                            keywords=self._clean_keywords(data.get("keywords", []))
+                        )
+                        break
+
+                    if meta is None:
+                        raise ValueError(
+                            f"Couldn't read metadata — {last_reason}. "
+                            f"Try a different model, or increase Keyword density."
+                        )
+
+                    self.result.emit(i, meta)
+                    self.log_message.emit(f"Done: {photo.filename}")
+
+                except requests.exceptions.ConnectionError:
+                    self.log_message.emit("Connection failed — is your AI backend running?")
+                    self.result.emit(i, "Cannot connect to AI backend. Check the URL and that it's running.")
+                except Exception as e:
+                    self.log_message.emit(f"Error: {e}")
+                    self.result.emit(i, str(e))
 
         self.finished_all.emit()
+
+
+# ─────────────────────────────────────────────────────────
+# File loader worker thread (performance: no thumbnails at load time)
+# ─────────────────────────────────────────────────────────
+
+class FileLoaderWorker(QThread):
+    """Loads photo files in background without generating thumbnails."""
+    progress = Signal(int, int)  # current, total
+    finished_loading = Signal(list)  # list of PhotoItem
+
+    def __init__(self, filepaths):
+        super().__init__()
+        self.filepaths = filepaths
+
+    def run(self):
+        items = []
+        total = len(self.filepaths)
+        for i, fp in enumerate(self.filepaths):
+            items.append(PhotoItem(filepath=fp, filename=os.path.basename(fp)))
+            if (i + 1) % 50 == 0 or i == total - 1:
+                self.progress.emit(i + 1, total)
+        self.finished_loading.emit(items)
 
 
 # ─────────────────────────────────────────────────────────
@@ -535,6 +594,154 @@ class MetadataWriter:
         if result.returncode != 0:
             raise RuntimeError(f"exiftool sidecar error: {result.stderr}")
         return True
+
+    @staticmethod
+    def write_metadata_batch(items, backup=True, append_keywords=False,
+                             skip_existing=False, use_sidecar=False,
+                             adobe_naming=False):
+        """Write metadata to multiple files using exiftool -stay_open batch mode.
+
+        items: list of (filepath, PhotoMetadata) tuples.
+        Sidecar items are handled individually (they need -o flag logic).
+        Returns (success_count, errors_list).
+        """
+        exiftool = MetadataWriter.find_exiftool() or "exiftool"
+        success = 0
+        errors = []
+
+        # Separate sidecar items from regular items
+        regular_items = []
+        sidecar_items = []
+        for filepath, metadata in items:
+            p = Path(filepath)
+            if use_sidecar and p.suffix.lower() in RAW_EXTENSIONS:
+                sidecar_items.append((filepath, metadata))
+            else:
+                regular_items.append((filepath, metadata))
+
+        # Process regular items in batch mode
+        if regular_items:
+            try:
+                proc = subprocess.Popen(
+                    [exiftool, "-stay_open", "True", "-@", "-"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+
+                for filepath, metadata in regular_items:
+                    arg_lines = []
+                    if not backup:
+                        arg_lines.append("-overwrite_original")
+
+                    # Check existing metadata if we need to skip or append
+                    existing_title, existing_caption, existing_keywords = "", "", []
+                    if skip_existing or append_keywords:
+                        existing_title, existing_caption, existing_keywords = \
+                            MetadataWriter.read_existing_metadata(filepath)
+
+                    # Title
+                    if not (skip_existing and existing_title):
+                        arg_lines.append(f"-IPTC:ObjectName={metadata.title}")
+                        arg_lines.append(f"-XMP:Title={metadata.title}")
+
+                    # Caption
+                    if not (skip_existing and existing_caption):
+                        arg_lines.append(f"-IPTC:Caption-Abstract={metadata.caption}")
+                        arg_lines.append(f"-XMP:Description={metadata.caption}")
+                        arg_lines.append(f"-EXIF:ImageDescription={metadata.caption}")
+
+                    # Keywords
+                    if append_keywords:
+                        existing_lower = {k.lower() for k in existing_keywords}
+                        new_keywords = [
+                            kw for kw in metadata.keywords
+                            if kw.lower() not in existing_lower
+                        ]
+                        for kw in new_keywords:
+                            arg_lines.append(f"-IPTC:Keywords+={kw}")
+                            arg_lines.append(f"-XMP:Subject+={kw}")
+                    else:
+                        arg_lines.append("-IPTC:Keywords=")
+                        arg_lines.append("-XMP:Subject=")
+                        for kw in metadata.keywords:
+                            arg_lines.append(f"-IPTC:Keywords+={kw}")
+                            arg_lines.append(f"-XMP:Subject+={kw}")
+
+                    arg_lines.append(filepath)
+                    arg_lines.append("-execute")
+
+                    proc.stdin.write("\n".join(arg_lines) + "\n")
+                    proc.stdin.flush()
+                    success += 1
+
+                # Close the batch session
+                proc.stdin.write("-stay_open\nFalse\n")
+                proc.stdin.flush()
+                proc.wait(timeout=120)
+
+            except Exception as e:
+                errors.append(f"Batch write error: {e}")
+
+        # Process sidecar items individually
+        for filepath, metadata in sidecar_items:
+            try:
+                MetadataWriter._write_sidecar(
+                    Path(filepath), metadata, adobe_naming=adobe_naming
+                )
+                success += 1
+            except Exception as e:
+                errors.append(f"{os.path.basename(filepath)}: {e}")
+
+        return success, errors
+
+
+# ─────────────────────────────────────────────────────────
+# Metadata write worker thread
+# ─────────────────────────────────────────────────────────
+
+class MetadataWriteWorker(QThread):
+    """Writes metadata to files in a background thread."""
+    progress = Signal(int, int)  # current, total
+    file_done = Signal(str, bool, str)  # filename, success, error_msg
+    finished_writing = Signal(int, int)  # success_count, error_count
+
+    def __init__(self, items, backup=True, append_keywords=False,
+                 skip_existing=False, use_sidecar=False, adobe_naming=False):
+        super().__init__()
+        self.items = items  # list of (filepath, PhotoMetadata)
+        self.backup = backup
+        self.append_keywords = append_keywords
+        self.skip_existing = skip_existing
+        self.use_sidecar = use_sidecar
+        self.adobe_naming = adobe_naming
+
+    def run(self):
+        total = len(self.items)
+        success_count = 0
+        error_count = 0
+
+        for i, (filepath, metadata) in enumerate(self.items):
+            try:
+                MetadataWriter.write_metadata(
+                    filepath, metadata,
+                    backup=self.backup,
+                    append_keywords=self.append_keywords,
+                    skip_existing=self.skip_existing,
+                    use_sidecar=self.use_sidecar,
+                    adobe_naming=self.adobe_naming,
+                )
+                success_count += 1
+                self.file_done.emit(os.path.basename(filepath), True, "")
+            except Exception as e:
+                error_count += 1
+                self.file_done.emit(os.path.basename(filepath), False, str(e))
+
+            self.progress.emit(i + 1, total)
+
+        self.finished_writing.emit(success_count, error_count)
 
 
 # ─────────────────────────────────────────────────────────
@@ -924,8 +1131,22 @@ class PhotoScribe(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PhotoScribe")
-        self.setMinimumSize(1100, 750)
-        self.resize(1300, 850)
+        self.setMinimumSize(900, 600)
+
+        # Dynamic window sizing based on screen resolution
+        screen = QApplication.primaryScreen()
+        if screen:
+            available = screen.availableGeometry()
+            w = min(int(available.width() * 0.80), available.width() - 100)
+            h = min(int(available.height() * 0.85), available.height() - 80)
+            w = max(w, 1100)
+            h = max(h, 750)
+            self.resize(w, h)
+            x = available.x() + (available.width() - w) // 2
+            y = available.y() + (available.height() - h) // 2
+            self.move(x, y)
+        else:
+            self.resize(1300, 850)
 
         self.photos: list[PhotoItem] = []
         self.worker: Optional[OllamaWorker] = None
@@ -1667,37 +1888,27 @@ class PhotoScribe(QMainWindow):
     def _on_files_dropped(self, filepaths):
         existing = {p.filepath for p in self.photos}
         new_files = [f for f in filepaths if f not in existing]
+        if not new_files:
+            return
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(new_files))
+        self.progress_bar.setValue(0)
+        self.status_label.setText(f"Loading {len(new_files)} files...")
+        self._file_loader = FileLoaderWorker(new_files)
+        self._file_loader.progress.connect(self._on_file_load_progress)
+        self._file_loader.finished_loading.connect(self._on_file_load_finished)
+        self._file_loader.start()
 
-        for fp in new_files:
-            photo = PhotoItem(
-                filepath=fp,
-                filename=os.path.basename(fp),
-            )
-            # Generate thumbnail
-            try:
-                ext = Path(fp).suffix.lower()
-                if ext in RAW_EXTENSIONS and HAS_RAWPY:
-                    with rawpy.imread(fp) as raw:
-                        rgb = raw.postprocess(
-                            use_camera_wb=True,
-                            half_size=True,
-                        )
-                    img = Image.fromarray(rgb)
-                else:
-                    img = Image.open(fp)
-                img.thumbnail((48, 48), Image.LANCZOS)
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-                data = img.tobytes("raw", "RGB")
-                qimg = QImage(data, img.width, img.height, img.width * 3, QImage.Format_RGB888)
-                photo.thumbnail = QPixmap.fromImage(qimg)
-            except Exception:
-                pass
+    def _on_file_load_progress(self, current, total):
+        self.progress_bar.setValue(current)
 
-            self.photos.append(photo)
-
+    def _on_file_load_finished(self, items):
+        self.progress_bar.setVisible(False)
+        self.photos.extend(items)
         self._refresh_photo_table()
-        self.log(f"Added {len(new_files)} photos ({len(self.photos)} total)")
+        self.log(f"Added {len(items)} photos ({len(self.photos)} total)")
+        self.status_label.setText("Ready")
+        self._file_loader = None
 
     def _clear_all(self):
         self.photos.clear()
@@ -1752,6 +1963,35 @@ class PhotoScribe(QMainWindow):
 
             self.photo_table.setRowHeight(row, 32)
 
+        total = len(self.photos)
+        done = sum(1 for p in self.photos if p.status == "done")
+        self.photo_count_label.setText(f"{total} photos loaded, {done} processed")
+
+    def _update_photo_row(self, row):
+        """Update a single row in the photo table (avoids full refresh)."""
+        if row < 0 or row >= len(self.photos):
+            return
+        photo = self.photos[row]
+        dot = StatusDot(photo.status)
+        container = QWidget()
+        cl = QHBoxLayout(container)
+        cl.setContentsMargins(4, 0, 0, 0)
+        cl.addWidget(dot)
+        self.photo_table.setCellWidget(row, 0, container)
+        item = QTableWidgetItem(photo.filename)
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        if photo.status == "error":
+            item.setForeground(QColor("#c0392b"))
+        self.photo_table.setItem(row, 1, item)
+        status_item = QTableWidgetItem(photo.status.capitalize())
+        status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+        status_colours = {"pending": "#555", "processing": "#e8a23a", "done": "#27ae60", "error": "#c0392b"}
+        status_item.setForeground(QColor(status_colours.get(photo.status, "#555")))
+        self.photo_table.setItem(row, 2, status_item)
+        title_text = photo.metadata.title if photo.metadata else ""
+        title_item = QTableWidgetItem(title_text)
+        title_item.setFlags(title_item.flags() & ~Qt.ItemIsEditable)
+        self.photo_table.setItem(row, 3, title_item)
         total = len(self.photos)
         done = sum(1 for p in self.photos if p.status == "done")
         self.photo_count_label.setText(f"{total} photos loaded, {done} processed")
@@ -1839,7 +2079,7 @@ class PhotoScribe(QMainWindow):
         if index < 0 or index >= len(self.photos):
             return
         self.photos[index].status = status
-        self._refresh_photo_table()
+        self._update_photo_row(index)
         self.progress_bar.setValue(
             sum(1 for p in self.photos if p.status in ("done", "error"))
         )
@@ -1854,7 +2094,7 @@ class PhotoScribe(QMainWindow):
             self.photos[index].status = "error"
             self.photos[index].error_msg = str(result)
 
-        self._refresh_photo_table()
+        self._update_photo_row(index)
         self.progress_bar.setValue(
             sum(1 for p in self.photos if p.status in ("done", "error"))
         )
@@ -1993,35 +2233,47 @@ class PhotoScribe(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        success = 0
-        errors = 0
-        for photo in completed:
-            try:
-                MetadataWriter.write_metadata(
-                    photo.filepath,
-                    photo.metadata,
-                    backup=self.backup_check.isChecked(),
-                    append_keywords=self.append_keywords_check.isChecked(),
-                    skip_existing=self.skip_existing_check.isChecked(),
-                    use_sidecar=use_sidecar,
-                    adobe_naming=adobe_naming,
-                )
-                success += 1
-                is_raw = Path(photo.filepath).suffix.lower() in RAW_EXTENSIONS
-                if use_sidecar and is_raw:
-                    xmp_name = Path(photo.filename).with_suffix(".xmp").name
-                    self.log(f"Wrote sidecar: {xmp_name}")
-                else:
-                    self.log(f"Wrote metadata: {photo.filename}")
-            except Exception as e:
-                errors += 1
-                self.log(f"Error writing {photo.filename}: {e}")
+        # Prepare items list
+        items = [(p.filepath, p.metadata) for p in completed]
 
-        self.status_label.setText(f"Written: {success} OK, {errors} errors")
+        # Show progress
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(items))
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Writing metadata...")
+        self.write_btn.setEnabled(False)
+
+        self._write_worker = MetadataWriteWorker(
+            items=items,
+            backup=self.backup_check.isChecked(),
+            append_keywords=self.append_keywords_check.isChecked(),
+            skip_existing=self.skip_existing_check.isChecked(),
+            use_sidecar=use_sidecar,
+            adobe_naming=adobe_naming,
+        )
+        self._write_worker.progress.connect(self._on_write_progress)
+        self._write_worker.file_done.connect(self._on_write_file_done)
+        self._write_worker.finished_writing.connect(self._on_write_finished)
+        self._write_worker.start()
+
+    def _on_write_progress(self, current, total):
+        self.progress_bar.setValue(current)
+
+    def _on_write_file_done(self, filename, success, error_msg):
+        if success:
+            self.log(f"Wrote metadata: {filename}")
+        else:
+            self.log(f"Error writing {filename}: {error_msg}")
+
+    def _on_write_finished(self, success_count, error_count):
+        self.progress_bar.setVisible(False)
+        self.write_btn.setEnabled(True)
+        self.status_label.setText(f"Written: {success_count} OK, {error_count} errors")
+        self._write_worker = None
         QMessageBox.information(
             self, "Complete",
-            f"Metadata written to {success} file(s).\n"
-            f"Errors: {errors}"
+            f"Metadata written to {success_count} file(s).\n"
+            f"Errors: {error_count}"
         )
 
     # ── Export ──
