@@ -2,6 +2,11 @@
 
 All notable changes to PhotoScribe are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.2.3] — 2026-06-22
+
+### Fixed
+- Keywords now **match an existing keyword vocabulary's spelling**. Generated keywords are snapped (case-insensitively) to the exact term from your keyword list, and case-insensitive duplicates are dropped. Stops Lightroom and other DAMs importing `sunset` as a new keyword separate from your existing `Sunset`.
+
 ## [1.2.2] — 2026-06-22
 
 First cross-platform release: macOS **and** Windows.
