@@ -13,6 +13,7 @@ import re
 import json
 import base64
 import threading
+import time
 import subprocess
 import shutil
 from pathlib import Path
@@ -116,6 +117,9 @@ class OllamaWorker(QThread):
         self.backend = backend  # "ollama" or "openai"
         self.max_tokens = max_tokens
         self._cancelled = False
+        self.batch_total_time = 0.0
+        self.batch_processed = 0
+        self.batch_avg_time = 0.0
 
     def cancel(self):
         self._cancelled = True
@@ -297,6 +301,9 @@ class OllamaWorker(QThread):
             self.finished_all.emit()
             return
 
+        batch_start = time.monotonic()
+        per_photo_times = []
+
         with ThreadPoolExecutor(max_workers=1) as executor:
             # Pre-encode the first image
             next_future = None
@@ -335,6 +342,7 @@ class OllamaWorker(QThread):
 
                 # Call the AI model with current image
                 try:
+                    photo_start = time.monotonic()
                     self.log_message.emit(f"Sending to {self.model}...")
 
                     # Call the model, retrying once if it returns nothing usable.
@@ -385,8 +393,10 @@ class OllamaWorker(QThread):
                             f"Try a different model, or increase Keyword density."
                         )
 
+                    elapsed = time.monotonic() - photo_start
+                    per_photo_times.append(elapsed)
                     self.result.emit(i, meta)
-                    self.log_message.emit(f"Done: {photo.filename}")
+                    self.log_message.emit(f"Done: {photo.filename} ({elapsed:.1f}s)")
 
                 except requests.exceptions.ConnectionError:
                     self.log_message.emit("Connection failed — is your AI backend running?")
@@ -394,6 +404,18 @@ class OllamaWorker(QThread):
                 except Exception as e:
                     self.log_message.emit(f"Error: {e}")
                     self.result.emit(i, str(e))
+
+        # Batch timing summary (read by the UI in _on_finished)
+        self.batch_total_time = time.monotonic() - batch_start
+        self.batch_processed = len(per_photo_times)
+        self.batch_avg_time = (
+            sum(per_photo_times) / len(per_photo_times) if per_photo_times else 0.0
+        )
+        if self.batch_processed:
+            self.log_message.emit(
+                f"Batch complete: {self.batch_processed} photos in "
+                f"{self.batch_total_time:.1f}s (avg {self.batch_avg_time:.1f}s)"
+            )
 
         self.finished_all.emit()
 
@@ -2106,7 +2128,20 @@ class PhotoScribe(QMainWindow):
 
         done = sum(1 for p in self.photos if p.status == "done")
         errors = sum(1 for p in self.photos if p.status == "error")
+
+        # Batch timing (from the worker)
+        timing = ""
+        if self.worker and getattr(self.worker, "batch_processed", 0):
+            total_t = self.worker.batch_total_time
+            avg_t = self.worker.batch_avg_time
+            timing = f" in {total_t:.1f}s (avg {avg_t:.1f}s)"
+
         self.status_label.setText(f"Finished: {done} processed, {errors} errors")
+        if timing:
+            total_photos = len(self.photos)
+            self.photo_count_label.setText(
+                f"{total_photos} photos loaded, {done} processed{timing}"
+            )
 
         if done > 0:
             self.write_btn.setEnabled(True)
