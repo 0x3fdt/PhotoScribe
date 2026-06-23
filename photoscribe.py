@@ -1669,21 +1669,27 @@ class PhotoScribe(QMainWindow):
         options_group = QGroupBox("Options")
         options_layout = QVBoxLayout(options_group)
 
+        # Checkboxes in two columns to save vertical space
+        checks_grid = QGridLayout()
+        checks_grid.setHorizontalSpacing(24)
+        checks_grid.setColumnStretch(0, 1)
+        checks_grid.setColumnStretch(1, 1)
+
         self.backup_check = QCheckBox("Create backup files when writing metadata")
         self.backup_check.setChecked(True)
-        options_layout.addWidget(self.backup_check)
+        checks_grid.addWidget(self.backup_check, 0, 0)
 
         self.append_keywords_check = QCheckBox(
             "Append keywords to existing (instead of replacing)"
         )
         self.append_keywords_check.setChecked(False)
-        options_layout.addWidget(self.append_keywords_check)
+        checks_grid.addWidget(self.append_keywords_check, 0, 1)
 
         self.skip_existing_check = QCheckBox(
             "Skip title/caption if file already has them"
         )
         self.skip_existing_check.setChecked(False)
-        options_layout.addWidget(self.skip_existing_check)
+        checks_grid.addWidget(self.skip_existing_check, 1, 0)
 
         self.describe_people_check = QCheckBox(
             "Describe people in photos (positions, roles, actions)"
@@ -1695,19 +1701,19 @@ class PhotoScribe(QMainWindow):
             "'group of hikers', 'child playing'). Does not attempt\n"
             "to identify individuals by name."
         )
-        options_layout.addWidget(self.describe_people_check)
+        checks_grid.addWidget(self.describe_people_check, 1, 1)
 
         self.dedup_keywords_check = QCheckBox(
             "Auto-deduplicate similar keywords (plurals, near-duplicates)"
         )
         self.dedup_keywords_check.setChecked(True)
-        options_layout.addWidget(self.dedup_keywords_check)
+        checks_grid.addWidget(self.dedup_keywords_check, 2, 0)
 
         self.exif_date_fallback_check = QCheckBox(
             "Use EXIF date as fallback when folder date not detected"
         )
         self.exif_date_fallback_check.setChecked(True)
-        options_layout.addWidget(self.exif_date_fallback_check)
+        checks_grid.addWidget(self.exif_date_fallback_check, 2, 1)
 
         self.gps_lookup_check = QCheckBox(
             "Look up location from GPS coordinates (requires internet)"
@@ -1719,13 +1725,15 @@ class PhotoScribe(QMainWindow):
             "This makes an external network request. Off by default."
         )
         self.gps_lookup_check.toggled.connect(self._on_gps_lookup_toggled)
-        options_layout.addWidget(self.gps_lookup_check)
+        checks_grid.addWidget(self.gps_lookup_check, 3, 0)
 
         self.sidecar_check = QCheckBox(
             "Write to XMP sidecar for RAW files"
         )
         self.sidecar_check.setChecked(True)
-        options_layout.addWidget(self.sidecar_check)
+        checks_grid.addWidget(self.sidecar_check, 3, 1)
+
+        options_layout.addLayout(checks_grid)
 
         sidecar_naming_row = QHBoxLayout()
         sidecar_naming_label = QLabel("DAM")
